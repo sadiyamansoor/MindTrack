@@ -3,12 +3,17 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:fl_chart/fl_chart.dart';
 
-void main() {
+// ═══════════════════════════════════════════════════════
+//  FIX: Added async + WidgetsFlutterBinding.ensureInitialized()
+//  so SharedPreferences is ready before the app starts.
+// ═══════════════════════════════════════════════════════
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
   runApp(const MindTrackApp());
 }
 
 // ═══════════════════════════════════════════════════════
-//  ROOT APP  ← THIS WAS MISSING — NOW FIXED
+//  ROOT APP
 // ═══════════════════════════════════════════════════════
 class MindTrackApp extends StatelessWidget {
   const MindTrackApp({super.key});
@@ -129,7 +134,7 @@ class MoodEntry {
   factory MoodEntry.fromMap(Map<String, dynamic> map) => MoodEntry(
         id: map['id'] ?? map['date'],
         mood: map['mood'],
-        studyHours: map['studyHours'],
+        studyHours: (map['studyHours'] as num).toDouble(),
         date: DateTime.parse(map['date']),
         note: map['note'] ?? '',
       );
@@ -137,27 +142,39 @@ class MoodEntry {
 
 // ═══════════════════════════════════════════════════════
 //  STORAGE HELPER
+//  FIX: Replaced all getInstance() calls with a single
+//  cached instance to avoid race conditions on some devices.
 // ═══════════════════════════════════════════════════════
 class StorageHelper {
   static const _entriesKey = 'mood_entries';
-  static const _goalKey = 'daily_goal';
+  static const _goalKey    = 'daily_goal';
+
+  // Cache the prefs instance so every call reuses the same object
+  static SharedPreferences? _prefs;
+  static Future<SharedPreferences> get _instance async {
+    _prefs ??= await SharedPreferences.getInstance();
+    return _prefs!;
+  }
 
   static Future<List<MoodEntry>> loadEntries() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getStringList(_entriesKey) ?? [];
-    return raw.map((e) => MoodEntry.fromMap(jsonDecode(e))).toList()..sort((a, b) => b.date.compareTo(a.date));
+    final prefs = await _instance;
+    final raw   = prefs.getStringList(_entriesKey) ?? [];
+    return raw
+        .map((e) => MoodEntry.fromMap(jsonDecode(e) as Map<String, dynamic>))
+        .toList()
+      ..sort((a, b) => b.date.compareTo(a.date));
   }
 
   static Future<void> saveEntry(MoodEntry entry) async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getStringList(_entriesKey) ?? [];
+    final prefs = await _instance;
+    final raw   = prefs.getStringList(_entriesKey) ?? [];
     raw.add(jsonEncode(entry.toMap()));
     await prefs.setStringList(_entriesKey, raw);
   }
 
   static Future<void> updateEntry(MoodEntry updated) async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getStringList(_entriesKey) ?? [];
+    final prefs  = await _instance;
+    final raw    = prefs.getStringList(_entriesKey) ?? [];
     final newRaw = raw.map((e) {
       final map = jsonDecode(e) as Map<String, dynamic>;
       return map['id'] == updated.id ? jsonEncode(updated.toMap()) : e;
@@ -166,26 +183,28 @@ class StorageHelper {
   }
 
   static Future<void> deleteEntry(String id) async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getStringList(_entriesKey) ?? [];
+    final prefs = await _instance;
+    final raw   = prefs.getStringList(_entriesKey) ?? [];
     raw.removeWhere((e) => (jsonDecode(e) as Map<String, dynamic>)['id'] == id);
     await prefs.setStringList(_entriesKey, raw);
   }
 
   static Future<void> saveGoal(double hours) async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = await _instance;
     await prefs.setDouble(_goalKey, hours);
   }
 
   static Future<double> loadGoal() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = await _instance;
     return prefs.getDouble(_goalKey) ?? 6.0;
   }
 
   static Future<void> clearAll() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = await _instance;
     await prefs.remove(_entriesKey);
     await prefs.remove(_goalKey);
+    // Reset cache so next load is clean
+    _prefs = null;
   }
 }
 
@@ -194,12 +213,12 @@ class StorageHelper {
 // ═══════════════════════════════════════════════════════
 String getSuggestion(String mood, double hours, double goal) {
   final pct = goal > 0 ? hours / goal : 0;
-  if (mood == 'Happy' && pct >= 1.0)        return '🔥 Goal crushed with great energy — you\'re unstoppable!';
-  if (mood == 'Happy' && hours < 3)         return '😊 Great mood! Channel that positivity into a longer session.';
+  if (mood == 'Happy' && pct >= 1.0)            return '🔥 Goal crushed with great energy — you\'re unstoppable!';
+  if (mood == 'Happy' && hours < 3)             return '😊 Great mood! Channel that positivity into a longer session.';
   if (mood == 'Neutral' && hours >= goal * 0.8) return '📚 Solid effort! Consistency beats perfection every time.';
-  if (mood == 'Neutral' && hours < 4)       return '💡 Feeling meh? Try the Pomodoro technique to get started.';
-  if (mood == 'Sad' && hours >= 4)          return '💪 Impressive dedication on a tough day. Remember to rest!';
-  if (mood == 'Sad')                        return '🌱 It\'s okay to have off days. Be kind to yourself today.';
+  if (mood == 'Neutral' && hours < 4)           return '💡 Feeling meh? Try the Pomodoro technique to get started.';
+  if (mood == 'Sad' && hours >= 4)              return '💪 Impressive dedication on a tough day. Remember to rest!';
+  if (mood == 'Sad')                            return '🌱 It\'s okay to have off days. Be kind to yourself today.';
   return '✨ Keep going — every hour counts toward your goal!';
 }
 
@@ -231,8 +250,9 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _loadData() async {
     final entries = await StorageHelper.loadEntries();
     final goal    = await StorageHelper.loadGoal();
+    if (!mounted) return;
     setState(() {
-      _entries = entries;
+      _entries   = entries;
       _dailyGoal = goal;
       _goalController.text = goal.toString();
     });
@@ -247,7 +267,10 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _saveEntry() async {
     final hours = double.tryParse(_hoursController.text.trim());
-    if (hours == null || hours < 0 || hours > 24) { _showSnack('Please enter valid study hours (0–24).'); return; }
+    if (hours == null || hours < 0 || hours > 24) {
+      _showSnack('Please enter valid study hours (0–24).');
+      return;
+    }
     final entry = MoodEntry(
       id: DateTime.now().millisecondsSinceEpoch.toString(),
       mood: _selectedMood,
@@ -258,15 +281,24 @@ class _HomeScreenState extends State<HomeScreen> {
     await StorageHelper.saveEntry(entry);
     await _loadData();
     final earned = computeEarnedBadges(_entries, _dailyGoal);
-    final badge = kBadges.where((b) => earned.contains(b.id)).lastOrNull;
+    final badge  = kBadges.where((b) => earned.contains(b.id)).lastOrNull;
     if (badge != null && mounted) _showBadgeToast(badge);
-    setState(() { _suggestion = getSuggestion(_selectedMood, hours, _dailyGoal); _hoursController.clear(); _noteController.clear(); });
+    if (!mounted) return;
+    setState(() {
+      _suggestion = getSuggestion(_selectedMood, hours, _dailyGoal);
+      _hoursController.clear();
+      _noteController.clear();
+    });
   }
 
   Future<void> _saveGoal() async {
     final goal = double.tryParse(_goalController.text.trim());
-    if (goal == null || goal <= 0 || goal > 24) { _showSnack('Please enter a valid goal (1–24 hours).'); return; }
+    if (goal == null || goal <= 0 || goal > 24) {
+      _showSnack('Please enter a valid goal (1–24 hours).');
+      return;
+    }
     await StorageHelper.saveGoal(goal);
+    if (!mounted) return;
     setState(() => _dailyGoal = goal);
     _showSnack('✅ Daily goal updated to ${goal}h!');
   }
@@ -287,9 +319,9 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _showEditDialog(MoodEntry entry) {
-    String editMood = entry.mood;
-    final editHours = TextEditingController(text: entry.studyHours.toString());
-    final editNote  = TextEditingController(text: entry.note);
+    String editMood       = entry.mood;
+    final editHours       = TextEditingController(text: entry.studyHours.toString());
+    final editNote        = TextEditingController(text: entry.note);
     showDialog(
       context: context,
       builder: (ctx) => StatefulBuilder(builder: (ctx, setS) => AlertDialog(
@@ -321,15 +353,22 @@ class _HomeScreenState extends State<HomeScreen> {
           const SizedBox(height: 16),
           const Text('Study Hours', style: TextStyle(fontWeight: FontWeight.w600)),
           const SizedBox(height: 8),
-          TextField(controller: editHours, keyboardType: const TextInputType.numberWithOptions(decimal: true),
-            decoration: InputDecoration(hintText: 'e.g. 3.5', filled: true, fillColor: Colors.grey.shade100,
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none))),
+          TextField(
+            controller: editHours,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            decoration: InputDecoration(
+              hintText: 'e.g. 3.5', filled: true, fillColor: Colors.grey.shade100,
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none)),
+          ),
           const SizedBox(height: 16),
           const Text('Journal Note', style: TextStyle(fontWeight: FontWeight.w600)),
           const SizedBox(height: 8),
-          TextField(controller: editNote, maxLines: 3,
-            decoration: InputDecoration(hintText: 'Any reflections...', filled: true, fillColor: Colors.grey.shade100,
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none))),
+          TextField(
+            controller: editNote, maxLines: 3,
+            decoration: InputDecoration(
+              hintText: 'Any reflections...', filled: true, fillColor: Colors.grey.shade100,
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none)),
+          ),
         ])),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
@@ -373,10 +412,16 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  void _showSnack(String msg) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  void _showSnack(String msg) =>
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
 
   @override
-  void dispose() { _hoursController.dispose(); _noteController.dispose(); _goalController.dispose(); super.dispose(); }
+  void dispose() {
+    _hoursController.dispose();
+    _noteController.dispose();
+    _goalController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -393,11 +438,19 @@ class _HomeScreenState extends State<HomeScreen> {
           IconButton(
             icon: const Icon(Icons.delete_outline),
             tooltip: 'Clear all data',
-            onPressed: () async { await StorageHelper.clearAll(); await _loadData(); setState(() => _suggestion = null); },
+            onPressed: () async {
+              await StorageHelper.clearAll();
+              await _loadData();
+              if (!mounted) return;
+              setState(() => _suggestion = null);
+            },
           ),
         ],
       ),
-      body: IndexedStack(index: _tabIndex, children: [_buildLogTab(), _buildAnalyticsTab(), _buildAchievementsTab()]),
+      body: IndexedStack(
+        index: _tabIndex,
+        children: [_buildLogTab(), _buildAnalyticsTab(), _buildAchievementsTab()],
+      ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _tabIndex,
         onDestinationSelected: (i) => setState(() { _tabIndex = i; _suggestion = null; }),
@@ -415,7 +468,7 @@ class _HomeScreenState extends State<HomeScreen> {
   // ═══════════════════════════════════════════════════
   Widget _buildLogTab() {
     final todayHours = _todayHours;
-    final progress = (_dailyGoal > 0 ? (todayHours / _dailyGoal).clamp(0.0, 1.0) : 0.0).toDouble();
+    final progress   = (_dailyGoal > 0 ? (todayHours / _dailyGoal).clamp(0.0, 1.0) : 0.0).toDouble();
     return SingleChildScrollView(
       padding: const EdgeInsets.all(20),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -434,7 +487,9 @@ class _HomeScreenState extends State<HomeScreen> {
         TextField(
           controller: _hoursController,
           keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          decoration: InputDecoration(hintText: 'e.g. 3.5', prefixIcon: const Icon(Icons.timer_outlined),
+          decoration: InputDecoration(
+            hintText: 'e.g. 3.5',
+            prefixIcon: const Icon(Icons.timer_outlined),
             filled: true, fillColor: Colors.white,
             border: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide.none)),
         ),
@@ -455,7 +510,8 @@ class _HomeScreenState extends State<HomeScreen> {
             onPressed: _saveEntry,
             icon: const Icon(Icons.save_alt),
             label: const Text('Save Entry', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF6C63FF), foregroundColor: Colors.white,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF6C63FF), foregroundColor: Colors.white,
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))),
           ),
         ),
@@ -482,10 +538,10 @@ class _HomeScreenState extends State<HomeScreen> {
       ]));
     }
     final totalHours = _entries.fold<double>(0, (s, e) => s + e.studyHours);
-    final happy   = _entries.where((e) => e.mood == 'Happy').length.toDouble();
-    final neutral = _entries.where((e) => e.mood == 'Neutral').length.toDouble();
-    final sad     = _entries.where((e) => e.mood == 'Sad').length.toDouble();
-    final avg     = totalHours / _entries.length;
+    final happy      = _entries.where((e) => e.mood == 'Happy').length.toDouble();
+    final neutral    = _entries.where((e) => e.mood == 'Neutral').length.toDouble();
+    final sad        = _entries.where((e) => e.mood == 'Sad').length.toDouble();
+    final avg        = totalHours / _entries.length;
     return SingleChildScrollView(
       padding: const EdgeInsets.all(20),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -608,7 +664,7 @@ class _HomeScreenState extends State<HomeScreen> {
   // ═══════════════════════════════════════════════════
 
   Widget _headerCard() {
-    final now = DateTime.now();
+    final now    = DateTime.now();
     const days   = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
     const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     return Container(
@@ -652,7 +708,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _goalProgressCard(double todayHours, double progress) {
     final isGoalMet = progress >= 1.0;
-    final color = isGoalMet ? const Color(0xFF43C59E) : progress >= 0.6 ? const Color(0xFFFFB84D) : const Color(0xFF6C63FF);
+    final color     = isGoalMet ? const Color(0xFF43C59E) : progress >= 0.6 ? const Color(0xFFFFB84D) : const Color(0xFF6C63FF);
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.grey.shade200)),
@@ -670,7 +726,7 @@ class _HomeScreenState extends State<HomeScreen> {
         const SizedBox(height: 10),
         ClipRRect(borderRadius: BorderRadius.circular(10),
           child: LinearProgressIndicator(value: progress, minHeight: 10, backgroundColor: Colors.grey.shade200,
-            valueColor: AlwaysStoppedAnimation<Color>(color))),
+              valueColor: AlwaysStoppedAnimation<Color>(color))),
         const SizedBox(height: 6),
         Text(isGoalMet ? 'Amazing work today!' : '${((1 - progress) * _dailyGoal).toStringAsFixed(1)}h more to reach your goal',
             style: const TextStyle(fontSize: 12, color: Colors.grey)),
@@ -693,17 +749,21 @@ class _HomeScreenState extends State<HomeScreen> {
           Expanded(child: TextField(
             controller: _goalController,
             keyboardType: const TextInputType.numberWithOptions(decimal: true),
-            decoration: InputDecoration(hintText: 'Hours (e.g. 6)', suffixText: 'hrs',
+            decoration: InputDecoration(
+              hintText: 'Hours (e.g. 6)', suffixText: 'hrs',
               filled: true, fillColor: Colors.grey.shade100,
               border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
               contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12)),
           )),
           const SizedBox(width: 10),
-          ElevatedButton(onPressed: _saveGoal,
-            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF6C63FF), foregroundColor: Colors.white,
+          ElevatedButton(
+            onPressed: _saveGoal,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF6C63FF), foregroundColor: Colors.white,
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14)),
-            child: const Text('Save')),
+            child: const Text('Save'),
+          ),
         ]),
       ]),
     );
@@ -721,8 +781,8 @@ class _HomeScreenState extends State<HomeScreen> {
       if (dayMap.containsKey(key)) dayMap[key] = (dayMap[key] ?? 0) + e.studyHours;
     }
     const dayLabels = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
-    final bars = dayMap.entries.toList();
-    final maxVal = bars.map((e) => e.value).reduce((a, b) => a > b ? a : b);
+    final bars      = dayMap.entries.toList();
+    final maxVal    = bars.map((e) => e.value).reduce((a, b) => a > b ? a : b);
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.grey.shade200)),
@@ -747,7 +807,8 @@ class _HomeScreenState extends State<HomeScreen> {
             getDrawingHorizontalLine: (_) => FlLine(color: Colors.grey.shade100, strokeWidth: 1)),
         borderData: FlBorderData(show: false),
         barGroups: List.generate(7, (i) => BarChartGroupData(x: i, barRods: [
-          BarChartRodData(toY: bars[i].value, width: 20,
+          BarChartRodData(
+            toY: bars[i].value, width: 20,
             borderRadius: const BorderRadius.vertical(top: Radius.circular(6)),
             color: i == 6 ? const Color(0xFF6C63FF) : const Color(0xFF6C63FF).withOpacity(0.35)),
         ])),
@@ -783,10 +844,10 @@ class _HomeScreenState extends State<HomeScreen> {
                 weekDays.any((d) => d.day == 1) ? months[weekDays.firstWhere((d) => d.day == 1).month] : '',
                 style: const TextStyle(fontSize: 9, color: Colors.grey))),
               ...weekDays.map((d) {
-                final key = '${d.year}-${d.month}-${d.day}';
-                final hours = dayHoursMap[key] ?? 0;
+                final key    = '${d.year}-${d.month}-${d.day}';
+                final hours  = dayHoursMap[key] ?? 0;
                 final isToday = d.year == today.year && d.month == today.month && d.day == today.day;
-                Color cellColor = hours == 0 ? Colors.grey.shade200
+                Color cellColor = hours == 0       ? Colors.grey.shade200
                     : hours < 2 ? const Color(0xFF6C63FF).withOpacity(0.2)
                     : hours < 4 ? const Color(0xFF6C63FF).withOpacity(0.45)
                     : hours < 6 ? const Color(0xFF6C63FF).withOpacity(0.7)
@@ -795,7 +856,8 @@ class _HomeScreenState extends State<HomeScreen> {
                   message: '${d.day}/${d.month}: ${hours.toStringAsFixed(1)}h',
                   child: Container(
                     margin: const EdgeInsets.all(2), height: 26,
-                    decoration: BoxDecoration(color: cellColor, borderRadius: BorderRadius.circular(4),
+                    decoration: BoxDecoration(
+                      color: cellColor, borderRadius: BorderRadius.circular(4),
                       border: isToday ? Border.all(color: const Color(0xFFFF7B7B), width: 2) : null),
                   ),
                 ));
@@ -856,8 +918,10 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _suggestionCard(String text) {
     return Container(
       padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(color: const Color(0xFFEEECFF), borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: const Color(0xFF6C63FF).withOpacity(0.3))),
+      decoration: BoxDecoration(
+        color: const Color(0xFFEEECFF),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFF6C63FF).withOpacity(0.3))),
       child: Row(children: [
         const Icon(Icons.lightbulb_outline, color: Color(0xFF6C63FF)),
         const SizedBox(width: 10),
@@ -880,7 +944,8 @@ class _HomeScreenState extends State<HomeScreen> {
             Text('${e.date.day}/${e.date.month}/${e.date.year}  •  ${e.studyHours}h',
                 style: const TextStyle(fontSize: 12, color: Colors.grey)),
           ])),
-          Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
             decoration: BoxDecoration(color: const Color(0xFF6C63FF).withOpacity(0.1), borderRadius: BorderRadius.circular(20)),
             child: Text('${e.studyHours}h', style: const TextStyle(color: Color(0xFF6C63FF), fontWeight: FontWeight.bold, fontSize: 13))),
           const SizedBox(width: 4),
@@ -891,7 +956,8 @@ class _HomeScreenState extends State<HomeScreen> {
         ]),
         if (e.note.isNotEmpty) ...[
           const SizedBox(height: 8),
-          Container(padding: const EdgeInsets.all(10),
+          Container(
+            padding: const EdgeInsets.all(10),
             decoration: BoxDecoration(color: const Color(0xFFF4F6FB), borderRadius: BorderRadius.circular(8)),
             child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
               const Icon(Icons.notes, size: 14, color: Colors.grey),
@@ -906,8 +972,10 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _statCard(String label, String value, IconData icon, {required Color color}) {
     return Container(
       padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(color: color.withOpacity(0.1), borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: color.withOpacity(0.2))),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: color.withOpacity(0.2))),
       child: Column(children: [
         Icon(icon, color: color, size: 22),
         const SizedBox(height: 8),
